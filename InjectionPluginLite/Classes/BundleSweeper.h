@@ -118,7 +118,7 @@ static NSMutableArray *sharedInstances;
 
     Class aClass = object_getClass(self);
     NSString *className = NSStringFromClass(aClass);
-    if ( [className characterAtIndex:1] == '_' || [className hasPrefix:@"UITransition"] )
+    if ( (className.length > 1 && [className characterAtIndex:1] == '_') || [className hasPrefix:@"UITransition"] )
         return;
     else
         [[bundleInjection liveInstances] addObject:self];
@@ -126,6 +126,12 @@ static NSMutableArray *sharedInstances;
     //printf("BundleSweeper sweep <%s %p>\n", [className UTF8String], self);
 
     for ( ; aClass && aClass != [NSObject class] ; aClass = class_getSuperclass(aClass) ) {
+        static Class xprobeSwift;
+        if ( isSwift( aClass ) && (xprobeSwift = xprobeSwift ?: xloadXprobeSwift("Xprobe")) ) {
+            [xprobeSwift injectionSweep:self forClass:aClass];
+            continue;
+        }
+
         unsigned ic;
         Ivar *ivars = class_copyIvarList(aClass, &ic);
         const char *currentClassName = class_getName(aClass), firstChar = currentClassName[0];
@@ -152,7 +158,8 @@ static NSMutableArray *sharedInstances;
     if ( [self respondsToSelector:@selector(document)] )
         [[self document] bsweep];
 
-    if ( [self respondsToSelector:@selector(contentView)] )
+    if ( [self respondsToSelector:@selector(contentView)] &&
+        [[self contentView] respondsToSelector:@selector(superview)] )
         [[[self contentView] superview] bsweep];
     if ( [self respondsToSelector:@selector(subviews)] )
         [[self subviews] bsweep];
@@ -225,9 +232,6 @@ static NSMutableArray *sharedInstances;
 
 @end
 
-@interface NSBlock : NSObject
-@end
-
 @implementation NSBlock(BundleSweeper)
 
 - (void)bsweep {
@@ -239,17 +243,17 @@ static NSMutableArray *sharedInstances;
 + (id)sharedInstance;
 @end
 
-static NSMutableDictionary *instancesSeen;
+static NSMutableDictionary *instancesDict;
 static NSMutableArray *liveInstances;
 
 @implementation BundleInjection(Sweeper)
 
 + (NSMutableDictionary *)instancesSeen {
-    return instancesSeen;
+    return instancesDict;
 }
 
 + (void)setInstancesSeen:(NSMutableDictionary *)dictionary {
-    instancesSeen = dictionary;
+    instancesDict = dictionary;
 }
 
 + (NSMutableArray *)liveInstances {
@@ -261,6 +265,19 @@ static NSMutableArray *liveInstances;
 }
 
 + (NSArray *)sweepForLiveObjects {
+    static int setup;
+    if ( !setup++ ) {
+        // add bsweep method to SwiftObject class!
+        Class swiftRoot = objc_getClass( "SwiftObject" );
+        SEL methodSEL = @selector(bsweep);
+        Method method = class_getInstanceMethod([NSObject class], methodSEL);
+        if ( !class_addMethod( swiftRoot, methodSEL,
+                              method_getImplementation( method ),
+                              method_getTypeEncoding( method ) ) )
+            NSLog( @"BundleSweeper: Could not add SwiftObject method: %s %p %s", sel_getName(methodSEL),
+                  (void *)method_getImplementation( method ), method_getTypeEncoding( method ) );
+    }
+
     Class bundleInjection = objc_getClass("BundleInjection");
     bundleInjection.instancesSeen = [NSMutableDictionary new];
     bundleInjection.liveInstances = [NSMutableArray new];
@@ -295,8 +312,10 @@ static NSMutableArray *liveInstances;
                 if ( strncmp( info.dli_fname, userClass, sizeof userClass-1 ) == 0 &&
                     strstr( info.dli_fname, "/InjectionBundle" ) == 0 ) {
                     id (*imp)( Class, SEL ) = (id (*)( Class, SEL ))method_getImplementation( m );
-                    NSLog( @"BundleSweeper: +[%@ sharedInstance] == %p()", classes[i], imp );
-                    [sharedInstances addObject:imp( classes[i], @selector(sharedInstance))];
+                    NSLog( @"BundleSweeper: +[%@ sharedInstance] == %p()", classes[i], (void *)imp );
+                    id shared = imp( classes[i], @selector(sharedInstance) );
+                    if ( shared )
+                        [sharedInstances addObject:shared];
                 }
             }
         }

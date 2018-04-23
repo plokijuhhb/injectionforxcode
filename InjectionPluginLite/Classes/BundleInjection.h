@@ -1,5 +1,5 @@
 //
-//  $Id: //depot/InjectionPluginLite/Classes/BundleInjection.h#121 $
+//  $Id: //depot/injectionforxcode/InjectionPluginLite/Classes/BundleInjection.h#19 $
 //  Injection
 //
 //  Created by John Holdsworth on 16/01/2012.
@@ -67,7 +67,7 @@ static const char *_inIPAddresses[100] = {INJECTOR_IPADDRS};
 #endif
 
 #ifdef DEBUG
-#define INLog NSLog
+#define INLog( _fmt... ) printf( "> Injection: %s\n", [NSString stringWithFormat:_fmt].UTF8String )
 #else
 #define INLog while(0) NSLog
 #endif
@@ -114,11 +114,13 @@ struct _in_header { int pathLength, dataLength; };
 - (NSArray *)inInstantiateWithOwner:(id)ownerOrNil options:(NSMutableDictionary *)optionsOrNil;
 @end
 #endif
+#if !TARGET_OS_TV
 @implementation UIAlertView(Injection)
 - (void)injectionDismiss {
     [self dismissWithClickedButtonIndex:0 animated:YES];
 }
 @end
+#endif
 //#else
 //#import <Cocoa/Cocoa.h>
 #endif
@@ -141,6 +143,31 @@ struct _in_header { int pathLength, dataLength; };
 
 @interface NSObject(UINibDecoder)
 - (id)inDecodeObjectForKey:(id)key;
+@end
+
+@interface NSObject(XprobeInit)
++ (void)connectTo:(const char *)ipAddress retainObjects:(BOOL)shouldRetain;
++ (void)search:(NSString *)classNamePattern;
+@end
+
+@interface NSObject(XCTestSuite)
++ testSuiteForTestCaseClass:(Class)testCaseClass;
+- initWithName:(NSString *)name;
+- addTest:test;
+- performTest:tr;
+@end
+
+@interface NSObject(XCTestSuiteRun)
++ testRunWithTest:test;
+@end
+
+@interface NSObject(XCTestCase)
+- initWithSelector:(SEL)sel;
+@end
+
+@interface NSObject(QuickWorld)
++ sharedWorld;
+- (void)setCurrentExampleMetadata:data;
 @end
 
 @implementation BundleInjection
@@ -198,9 +225,13 @@ static int status, sbInjection;
 static int multicastSocket;
 static BOOL injectAndReset;
 
+static NSMutableArray *previousInjections;
+static NSString *kPreviousInjections = @"INPreviousInjections";
+
 #ifndef ANDROID
 static NSNetServiceBrowser *browser;
 static NSNetService *service;
+static dispatch_queue_t testQueue;
 
 +(void)netServiceBrowser:(NSNetServiceBrowser *)aBrowser didFindService:(NSNetService *)aService moreComing:(BOOL)more {
     service = aService;
@@ -343,7 +374,7 @@ static NSNetService *service;
     else if ( connect( loaderSocket, (struct sockaddr *)&loaderAddr, sizeof loaderAddr ) >= 0 )
         return loaderSocket;
 
-    INLog( @"%s: Could not connect: %s", INJECTION_APPNAME, strerror( errno ) );
+    INLog( @"%s could not connect: %s", INJECTION_APPNAME, strerror( errno ) );
     close( loaderSocket );
     return 0;
 }
@@ -398,7 +429,7 @@ static const char **addrPtr, *connectedAddress;
         size_t alen = strlen(arch)+1;
 
         int i;
-        for ( i = 0 ; i < 5 ; i++ ) {
+        for ( i = 0 ; i < 3 ; i++ ) {
             int loaderSocket = 0;
 
             for ( addrPtr = addrSwitch ; *addrPtr;  addrPtr++ )
@@ -447,6 +478,11 @@ static const char **addrPtr, *connectedAddress;
             INLog( @"Connected to \"%s\" plugin, ready to load %s code.", INJECTION_APPNAME, arch );
             connectedAddress = *addrPtr;
 
+            BOOL isPatchedInjection = [NSBundle bundleForClass:self] == [NSBundle mainBundle];
+            if ( isPatchedInjection )
+                [self performSelectorOnMainThread:@selector(applyPreviousInjections)
+                                       withObject:nil waitUntilDone:YES];
+
             int fdout = 0;
             struct _in_header header;
             while ( [self readHeader:&header forPath:path from:loaderSocket] ) {
@@ -468,16 +504,44 @@ static const char **addrPtr, *connectedAddress;
                             NSLog( @"Synchronization error." );
                         if ( !status )
                             NSLog( @"*** Bundle has failed to load. If this is due to symbols not found, this may be due to symbols being hidden from dynamic libraries. ***");
+                        else if ( previousInjections ) {
+                            [previousInjections addObject:[NSString stringWithUTF8String:path]];
+                            [[NSUserDefaults standardUserDefaults]
+                             setObject:previousInjections forKey:kPreviousInjections];
+                        }
                         write( loaderSocket, &status, sizeof status );
                         break;
+
+                    case '@': // load dylib
+                        status = NO;
+                        if ( header.dataLength == INJECTION_MAGIC )
+                            [self performSelectorOnMainThread:@selector(loadDylib)
+                                                   withObject:nil waitUntilDone:YES];
+                        else
+                            NSLog( @"Synchronization error." );
+                        if ( !status )
+                            NSLog( @"*** Bundle has failed to load. If this is due to symbols not found, this may be due to symbols being hidden from dynamic libraries. ***");
+                        write( loaderSocket, &status, sizeof status );
+                        break;
+
+                    case '+': { // load Xprobe
+                        Class xprobe = objc_getClass("Xprobe");
+                        if ( !xprobe )
+                            NSLog( @"*** Xprobe does not work with patched injection ***");
+                        [xprobe connectTo:NULL retainObjects:NO];
+                        [xprobe search:@""];
+                        break;
+                    }
 
                     case '>': // open file/directory to write/create
                         if ( header.dataLength == INJECTION_NOFILE ) {
                             if ( (fdout = open( file, O_CREAT|O_TRUNC|O_WRONLY, 0755 )) < 0 )
                                 NSLog( @"Could not open \"%s\" for copy as: %s", file, strerror(errno) );
                         }
-                        else if ( header.dataLength == INJECTION_MKDIR )
-                            mkdir( file, 0777 );
+                        else if ( header.dataLength == INJECTION_MKDIR ) {
+                            if ( mkdir( file, 0777 ) && errno != EEXIST )
+                                NSLog( @"Could not mkdir \"%s\" for copy as: %s", file, strerror(errno) );
+                        }
                         else {
                             if ( (fdout = open( file, O_CREAT|O_TRUNC|O_WRONLY, 0755 )) < 0 )
                                 NSLog( @"Could not open \"%s\" for download as: %s", file, strerror(errno) );
@@ -638,15 +702,56 @@ static const char **addrPtr, *connectedAddress;
 #endif
 }
 
+static time_t buildTime( NSString *path ) {
+    struct stat st;
+    return stat([path UTF8String], &st) == 0 ? st.st_mtime : 0;
+}
+
+static time_t bundleBuildTime( NSString *path ) {
+    return buildTime( [path stringByAppendingPathComponent:@"InjectionBundle"] );
+}
+
++ (void)applyPreviousInjections {
+    previousInjections = [[[NSUserDefaults standardUserDefaults]
+                           valueForKey:kPreviousInjections] mutableCopy] ?: [NSMutableArray new];
+
+    [previousInjections sortUsingComparator:^NSComparisonResult(id path1, id path2) {
+        return bundleBuildTime( path1 ) < bundleBuildTime( path2 ) ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
+    time_t lastBuilt = buildTime( [[NSBundle mainBundle] executablePath] );
+
+    while ( [previousInjections count] && lastBuilt > bundleBuildTime( [previousInjections firstObject] ) )
+        [previousInjections removeObjectAtIndex:0];
+
+    if ( ![previousInjections count] )
+        return;
+
+    INLog( @"%s: re-applying injections more recent than app binary", INJECTION_APPNAME );
+    for ( NSString *bundle in previousInjections ) {
+        strcpy( path, [bundle UTF8String] );
+        [self loadBundle];
+    }
+}
+
 #ifndef ANDROID
 + (void)loadBundle {
+    INLog( @"Loading %s", path );
     NSBundle *bundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:path]];
     if ( !bundle )
         NSLog( @"Could not initalise bundle at \"%s\"", path );
     else
         ;//INLog( @"Injecting Bundle: %s", path );
-    if ( ![bundle load] )
-        NSLog( @"Bundle Load Error" );
+    NSError *err;
+    if ( ![bundle loadAndReturnError:&err] )
+        INLog( @"Bundle Load Error %@", err );
+}
+
++ (void)loadDylib {
+    if ( !dlopen( path+1, RTLD_NOW ) )
+        NSLog( @"Could not initalise dylib at \"%s\"", path+1 );
+    else
+        ;//INLog( @"Injecting Bundle: %s", path );
 }
 
 // a little inside knowledge of Objective-C data structures for the new version of the class ...
@@ -783,7 +888,7 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
 + (void)dumpIvars:(Class)aClass {
     unsigned i, ic = 0;
     Ivar *vars = class_copyIvarList(aClass, &ic);
-    NSLog( @"0x%p[%u]", vars, ic );
+    NSLog( @"0x%p[%u]", (void *)vars, ic );
     for ( i=0; i<ic ; i++ )
         NSLog( @"%s %s %d", ivar_getName(vars[i]), ivar_getTypeEncoding(vars[i]), (int)ivar_getOffset(vars[i]));
 }
@@ -821,7 +926,7 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
         const char *type = method_getTypeEncoding(methods[i]);
 
         //NSLog( @"Swizzling: %c[%s %s] %s to: %p", which, className, sel_getName(sel), type, newIMPL );
-#ifdef XTRACE_EXCLUSIONS
+#ifdef APPEND_TYPE
         if ( originals.find(oldClass) != originals.end() &&
             originals[oldClass].find(sel) != originals[oldClass].end() )
             originals[oldClass][sel].original = (XTRACE_VIMP)newIMPL;
@@ -859,6 +964,7 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
     [self dumpIvars:oldClass];
     [self dumpIvars:newClass];
 #endif
+#if !TARGET_OS_TV
 #ifdef __IPHONE_OS_VERSION_MIN_REQUIRED
     if ( notify & INJECTION_NOTSILENT ) {
         NSString *msg = [[NSString alloc] initWithFormat:@"Class '%@' injected.",
@@ -874,6 +980,7 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
         [msg release];
 #endif
     }
+#endif
 #else
     //INLog( @" ...ignore any warning, Injection has swizzled class '%s'", className );
 #endif
@@ -986,20 +1093,59 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
     if ( referencesSection )
         dispatch_async(dispatch_get_main_queue(), ^{
             Class *classReferences = (Class *)(void *)((char *)info.dli_fbase+(uint64_t)referencesSection);
-
+            NSMutableArray *testClasses = [NSMutableArray array];
+            
             for ( unsigned long i=0 ; i<size/sizeof *classReferences ; i++ ) {
                 Class newClass = classReferences[i];
                 NSString *className = NSStringFromClass(newClass);
 
-                if ( !seenInjectionClass )
+                if ( !seenInjectionClass && 0 )
                     seenInjectionClass = [className hasPrefix:@"InjectionBundle"];
                 else {
 #ifndef INJECTION_LEGACY32BITOSX
                     [newClass class];
 #endif
                     Class oldClass = [self loadedClass:newClass notify:notify];
-                    NSLog( @"Ignore any warning, Swizzled %@ %p -> %p", className, newClass, oldClass );
+                    INLog( @"Ignore any warning, Swizzled %@ %p -> %p", className,
+                          INJECTION_BRIDGE(void *)newClass, INJECTION_BRIDGE(void *)oldClass );
                     [injectedClasses addObject:oldClass];
+                }
+
+                if ( [newClass isSubclassOfClass:objc_getClass("XCTestCase")] ) {
+                    [testClasses addObject:newClass];
+                    if ( [newClass isSubclassOfClass:objc_getClass("QuickSpec")] )
+                        [[objc_getClass("_TtC5Quick5World") sharedWorld]
+                         setCurrentExampleMetadata:nil];
+                }
+
+            }
+            
+            if (testClasses.count){
+                void (^runTests)() = ^{
+                    for (Class newClass in testClasses) {
+                        id suite0 = [[objc_getClass("XCTestSuite") alloc] initWithName:@"Injected"];
+                        id suite = [objc_getClass("XCTestSuite") testSuiteForTestCaseClass:newClass];
+                        id tr = [objc_getClass("XCTestSuiteRun") testRunWithTest:suite];
+                        [suite0 addTest:suite];
+                        [suite0 performTest:tr];
+                    }
+                };
+
+                if ([UIDevice currentDevice].systemVersion.floatValue < 10.0)
+                    runTests();
+                else {
+                    if (!testQueue){
+                        testQueue = dispatch_queue_create("INTestQueue", NULL);
+                    }
+
+                    dispatch_async(testQueue, ^{
+                        dispatch_suspend(testQueue);
+                        NSTimer *timer = [NSTimer timerWithTimeInterval:0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+                            runTests();
+                            dispatch_resume(testQueue);
+                        }];
+                        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+                    });
                 }
             }
 
@@ -1032,6 +1178,8 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
                     if ( [oldClass respondsToSelector:@selector(injected)] )
                         [oldClass injected];
 
+                    [self injectedClass:oldClass];
+
                     // implementation of -injected
                     if ( [oldClass respondsToSelector:@selector(instancesRespondToSelector:)] &&
                         [oldClass instancesRespondToSelector:@selector(injected)] ) {
@@ -1054,8 +1202,6 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
                             if ( ![obj isProxy] && [obj isKindOfClass:oldClass] )
                                 [obj injected];
                     }
-
-                    [self injectedClass:oldClass];
                 }
 
                 [[NSNotificationCenter defaultCenter] postNotificationName:kINNotification
@@ -1063,7 +1209,7 @@ struct _in_objc_class { Class meta, supr; void *cache, *vtable; struct _in_objc_
             });
         });
     else
-        NSLog( @"Injection Error: Could not locate referencesSection" );
+        NSLog( @"Injection Error: Could not locate referencesSection, are there any classes being injected?" );
 
     status = referencesSection != NULL;
 #endif

@@ -1,5 +1,5 @@
 //
-//  $Id: //depot/InjectionPluginLite/Classes/INPluginClientController.h#14 $
+//  $Id: //depot/injectionforxcode/InjectionPluginLite/Classes/INPluginClientController.h#1 $
 //  InjectionPluginLite
 //
 //  Created by John Holdsworth on 15/01/2013.
@@ -22,18 +22,22 @@
 //
 
 #import <Cocoa/Cocoa.h>
-#import "Xtrace.h"
 
 @class INPluginMenuController;
 
 @interface INPluginClientController : NSObject
 
+@property (nonatomic,retain) IBOutlet NSPanel *consolePanel;
+@property (nonatomic,retain) IBOutlet NSPanel *paramsPanel;
+
+@property (nonatomic,retain) NSMutableDictionary *sourceFiles;
 @property (nonatomic,retain) NSString *scriptPath;
 @property (nonatomic) BOOL withReset;
 
 - (void)alert:(NSString *)msg;
 - (void)setConnection:(int)clientConnection;
 - (void)runScript:(NSString *)script withArg:(NSString *)selectedFile;
+- (void)writeString:(NSString *)string;
 - (BOOL)connected;
 
 @end

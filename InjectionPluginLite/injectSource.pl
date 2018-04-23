@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 
-#  $Id: //depot/InjectionPluginLite/injectSource.pl#76 $
+#  $Id: //depot/injectionforxcode/InjectionPluginLite/injectSource.pl#20 $
 #  Injection
 #
 #  Created by John Holdsworth on 16/01/2012.
@@ -12,7 +12,9 @@
 use strict;
 use FindBin;
 use lib $FindBin::Bin;
+use JSON::PP;
 use common;
+use InjectUnitTests;
 
 my $compileHighlight = "{\\colortbl;\\red0\\green0\\blue0;\\red160\\green255\\blue160;}\\cb2\\i1";
 my $errorHighlight = "{\\colortbl;\\red0\\green0\\blue0;\\red255\\green255\\blue130;}\\cb2";
@@ -21,6 +23,11 @@ my $bundleProjectFile = "$InjectionBundle/InjectionBundle.xcodeproj/project.pbxp
 my $bundleProjectSource = -f $bundleProjectFile && loadFile( $bundleProjectFile );
 my $mainProjectFile = "$projName.xcodeproj/project.pbxproj";
 my $isSwift = $selectedFile =~ /\.swift$/;
+my @unitTestLearnt = ();
+my @allResources = ();
+
+use utf8;
+utf8::upgrade($selectedFile);
 
 if ( !$isAppCode ) {
     print "buidRoot: $buildRoot\n";
@@ -64,7 +71,7 @@ if ( !$executable ) {
 if ( !$bundleProjectSource ) {
     print "Copying $template into project.\n";
 
-    0 == system "cp -rf \"$FindBin::Bin/$template\" $InjectionBundle && chmod -R og+w $InjectionBundle"
+    0 == system "rm -rf $InjectionBundle; cp -rf \"$FindBin::Bin/$template\" $InjectionBundle && chmod -R og+w $InjectionBundle"
         or error "Could not copy injection bundle.";
 
     # try to use main project's precompilation header
@@ -127,15 +134,30 @@ $config .= " -sdk iphoneos" if $isDevice;
 my $infoFile = "$archDir/identity.txt";
 
 if ( !-f $infoFile ) {
-    my %VARS = `$xcodebuild -showBuildSettings $config` =~ /    (\w+) = (.*)\n/g;
-    IO::File->new( "> $infoFile" )->print( "$VARS{CODESIGNING_FOLDER_PATH}\n$VARS{CODE_SIGN_IDENTITY}\n");
+    print "!!Extracting project parameters into $infoFile ...\n";
+    my $cpid = open VARFH, "$xcodebuild -showBuildSettings $config |" or die;
+    $SIG{ALRM} = sub { print "!!xcodebuild timeout\n"; kill 9, $cpid; };
+    alarm 10;
+
+    my %VARS;
+    while ( my $line = <VARFH> ) {
+        if ( $line =~ /    (\w+) = (.*)\n/ ) {
+            $VARS{$1} = $2;
+        }
+    }
+
+    alarm 0;
+    close VARFH;
+    $SIG{ALRM} = undef;
+    IO::File->new( "> $infoFile" )->print( "$VARS{CODESIGNING_FOLDER_PATH}\n$VARS{CODE_SIGN_IDENTITY}\n" );
 }
 
 my ($localBundle, $identity) = loadFile( $infoFile );
 $localBundle =~ s@^.*/Build/@$buildRoot/@ if $buildRoot;
 (my $localBinary = $localBundle) =~ s@([^./]+).app@$1.app/$1@;
 
-unlink $infoFile if $buildRoot && !-d $localBundle;
+#unlink $infoFile if $buildRoot && !-d $localBundle;
+system "rm -rf \"$localBundle/Frameworks/IDEBundleInjection.framework\"";
 
 if ( $localBinary && $bundleProjectSource =~ s/(BUNDLE_LOADER = )([^;]+;)/$1"$localBinary";/g ) {
     print "Patching bundle project to app path: $localBinary\n";
@@ -194,7 +216,7 @@ if ( !$logDir ) {
     @logs = ($memory)
 }
 else {
-    @logs = split "\n", `ls -t "$logDir"/*.xcactivitylog`;
+    @logs = split "\n", `ls -t "$logDir"/*.xcactivitylog "$logDir"/../Debug/*.xcactivitylog`;
 }
 
 #
@@ -211,9 +233,17 @@ if ( !$learnt ) {
         my ($filename) = $selectedFile =~ /\/([^\/]+)$/;
         my $isInterface = $selectedFile =~ /\.(storyboard|xib)$/;
 
+        if ( time() - mtime($selectedFile) > 5 ) {
+            print("!!\n!!** File not recently modified. Did you save it? **\n");
+        }
+
         local $/ = "\r";
     FOUND:
-        foreach my $log (@logs) {
+        foreach my $log (@logs) {           
+            #
+            # Find build commands
+            #
+
             open LOG, "gunzip <'$log' 2>/dev/null |";
             if ( $isInterface ) {
                 while ( my $line = <LOG> ) {
@@ -234,21 +264,71 @@ if ( !$learnt ) {
                 }
             }
             else {
+                my $requiresFileList = 0;
+                my @swiftcCommands = ();
+                my @unitTestsClangCommands = ();
+                my %copySwiftModuleCommands = ();
+                my @resourcesToLink = ();
+
                 while ( my $line = <LOG> ) {
-                    if ( index( $line, $filename ) != -1 && index( $line, " $arch" ) != -1 &&
-                        $line =~ m!@{[$xcodeApp||""]}/Contents/Developer/Toolchains/XcodeDefault\.xctoolchain.+?@{[
+                    if (!$learnt && index( $line, $filename ) != -1 && index( $line, " $arch" ) != -1 &&
+                        $line =~ m!@{[$xcodeApp||""]}/Contents/Developer/Toolchains/.*?\.xctoolchain.+?@{[
                                 $isSwift ? " -primary-file ": " -c "
                             ]}("$selectedFile"|\Q$escaped\E)! ) {
                         $learnt .= ($learnt?';;':'').$line;
-                        last FOUND;
+                        $requiresFileList = $learnt =~ / -filelist /;
+                    }
+                    if ($requiresFileList && (my($filemap) = $line =~ / -output-file-map ([^ \\]+(?:\\ [^ \\]+)*) / )) {
+                        $requiresFileList = 0;
+                        $filemap =~ s/\\//g;
+                        my $file_handle = IO::File->new( "< $filemap" )
+                            || error "Could not open filemap '$filemap'";
+                        my $json_text = join'', $file_handle->getlines();
+                        my $json_map = decode_json( $json_text, { utf8  => 1 } );
+                        my $filelist = "$InjectionBundle/filelist.txt";
+                        $filelist = "$projRoot/$filelist" if $filelist !~ m@^/@;
+                        my $swift_sources = join "\n", keys %$json_map;
+                        IO::File->new( "> $filelist" )->print( $swift_sources );
+                        $learnt =~ s/( -filelist )(\S+)( )/$1$filelist$3/;
+                    }
+
+                    if ( $line =~ /\/swiftc\s/ &&
+                        (my ($localModuleName) = $line =~ /-module-name\s(\S*)\s/) ){
+                            my $swiftCLine = $line;
+                            $swiftCLine =~ s/^\s+|\s+$//g;
+                            push (@swiftcCommands, $swiftCLine);
+                    }
+
+                    if (  index( $line, "/clang " ) != -1 && index( $line, " $arch" ) != -1 && index( $line, "-framework XCTest" ) != -1 ){
+                        push (@unitTestsClangCommands, $line);
+                    }
+
+                    if ($line =~ /ditto\s-rsrc.*\/([^\/]*)\.swiftmodule\/$arch.swiftmodule/ )  {
+                        $copySwiftModuleCommands{$1} = $line;
+                    }
+
+                    if ($line =~ /\"Copy\s([^\"]*)([^\"]*)\d*\"CpResource\s\2\s/ )  {
+                        push (@resourcesToLink, "$1$2");
                     }
                 }
+
+                # Unit tests procedure
+                if ($isSwift && (scalar @unitTestsClangCommands > 0)) {
+                    my $hashRef = InjectUnitTests::rebuild_project_and_find_unit_tests_commands($selectedFile, \@swiftcCommands, \@unitTestsClangCommands, \%copySwiftModuleCommands);
+                    $learnt = $hashRef->{implementationCommand} if !$learnt;
+                    
+                    @unitTestLearnt = @{$hashRef->{unitTestLearnt}} if $learnt;
+                    @allResources = @resourcesToLink if $learnt;
+                }
+
+                error "Could not locate filemap" if $requiresFileList && $learnt;
+                last FOUND if $learnt;
             }
         }
 
         close LOG;
 
-        error "Could not locate compile command for $escaped\nIf you have switched xcode versions, please cmd-shift-k to clean then rebuild the project so there is a complete build history logged and try again.\n@logs" if $isSwift && !$learnt;
+        error "Could not locate compile command for $escaped\nInjection doesn't work when using whole module optimisation.\nIf you have switched xcode versions, please cmd-shift-k to clean then rebuild the project so there is a complete build history logged and try again.\n@logs" if $isSwift && !$learnt;
     }
 }
 
@@ -296,9 +376,7 @@ extern
 };
 #endif
 
-\@interface $productName : NSObject
-\@end
-\@implementation $productName
+\@implementation NSObject($productName)
 
 + (void)load {
     Class bundleInjection = NSClassFromString(@"BundleInjection");
@@ -309,7 +387,7 @@ extern
 
 int injectionHook() {
     NSLog( \@"injectionHook():" );
-    [$productName load];
+    [NSObject load];
     return YES;
 }
 
@@ -318,6 +396,7 @@ int injectionHook() {
 CODE
 
 $changesSource->close();
+
 
 ############################################################################
 #
@@ -329,6 +408,7 @@ $changesSource->close();
 #
 
 my $obj = '';
+my $sdk = ($config =~ /-sdk (\w+)/)[0] || 'macosx';
 
 if ( $learnt ) {
 
@@ -336,6 +416,14 @@ if ( $learnt ) {
     $learnt =~ s@( -o ).*$@$1$InjectionBundle/$obj@
         or die "Could not locate object file in: $learnt";
     ###$learnt =~ s/( -DDEBUG\S* )/$1-DINJECTION_BUNDLE /;
+
+    # Disable Code coverage for injection file
+    # swift
+    $learnt =~ s/-profile-generate//g;
+    $learnt =~ s/-profile-coverage-mapping//g;
+    # objc
+    $learnt =~ s/-fprofile-instr-generate//g;
+    $learnt =~ s/-fcoverage-mapping//g;
 
     $learnt =~ s/([()])/\\$1/g;
     rtfEscape( my $lout = $learnt );
@@ -348,17 +436,38 @@ if ( $learnt ) {
     }
     error "Learnt compile failed" if $?;
 
+    $obj .= InjectUnitTests::recompile_unit_tests(\@unitTestLearnt, "$arch/injecting_class", "$InjectionBundle/");
+
     #if ( $isSwift ) {
-        my ($toolchain) = $learnt =~ m#(@{[$xcodeApp||'/Applications/Xcode']}.*?/XcodeDefault.xctoolchain)/#;
-        my $sdk = ($config =~ /-sdk (\w+)/)[0] || 'macosx';
+        my ($toolchain) = $learnt =~ m#(@{[$xcodeApp||'/Applications/Xcode']}.*?\.xctoolchain)/#;
+        if ( $learnt =~ /-(appletvsimulator)\// ) {
+            $config =~ s/iphone/appletv/
+        }
+#        $bundleProjectSource =~ s/\bFRAMEWORK_SEARCH_PATHS = [^;]*;/FRAMEWORK_SEARCH_PATHS = "$buildRoot\/Products\/Debug-$sdk\/\*\*";/g;
         $obj .= "\", \"-L'$toolchain'/usr/lib/swift/$sdk";
-        $obj .= "\", \"-F$buildRoot/Products/Debug-$sdk" if $buildRoot;
+        $obj .= "\", \"-F'$buildRoot'/Products/Debug-$sdk" if $buildRoot;
     #}
+    $obj .= "\", \"-rpath\", \"'$toolchain'/usr/lib/swift/$sdk";
 }
 
 if ( -d (my $frameworkDir = "$localBundle/Frameworks") ) {
     my @frameworks = `cd '$frameworkDir'; ls -d *.framework` =~ /(\S+)\.framework/g;
-    $obj .= join "", "\", \"-F$frameworkDir", map "\", \"-framework\", \"$_", @frameworks;
+    $obj .= join "", "\", \"-F'$frameworkDir'", map "\", \"-framework\", \"$_", @frameworks;
+}
+
+(my $appPackage = $executable) =~ s#(?:(/Contents)/MacOS)?/[^/]*$#$1||''#e;
+$ENV{BUNDLE_FRAMEWORKS} = "$appPackage/Frameworks";
+$obj .= "\", \"-F'\$BUNDLE_FRAMEWORKS'";
+#$obj .= "\", \"-F'$appPackage'/Frameworks";
+
+if ( -d "Pods" ) {
+    my %already;
+    foreach my $dir (reverse split /\n/, `find '$projRoot'/Pods '$buildRoot'/Products/Debug-$sdk -name '*.framework'`) {
+        $dir =~ s@/[^/]+$@@;
+        if ( !$already{$dir}++ ) {
+            $obj .= "\", \"-F'$dir'\", \"-rpath\", \"'$dir'";
+        }
+    }
 }
 
 $bundleProjectSource =~ s/(OTHER_LDFLAGS = \().*?("-undefined)/$1"$obj", $2/sg;
@@ -407,6 +516,8 @@ while ( my $line = <BUILD> ) {
         if ( $cmd =~ /BundleContents\.m/ ) {
             $cmd = "if [[ ! -f $dotdot$builtfile ]]; then $cmd && touch $dotdot$builtfile; fi";
         }
+        (my $bundle_frameworks = $ENV{BUNDLE_FRAMEWORKS}) =~ s/ /\\\\ /g;
+        $cmd =~ s/$bundle_frameworks/"\$BUNDLE_FRAMEWORKS"/g;
         $recording->print( "echo \"$cmd\"; time $cmd 2>&1 &&\n" );
         $recorded++;
     }
@@ -502,12 +613,21 @@ if ( $flags & $INJECTION_STORYBOARD ) {
     close NIBS;
 }
 
-if ( $isDevice ) {
+# Link all resources as symbolic link to a bundle 
+foreach my $resourceFullpath (@allResources) {
+    my $copyCommand = "ln -sf $resourceFullpath \"$bundlePath\" || true";
+    system $copyCommand;
+}
+
+$identity = "-" if !$isDevice;
+if ( $identity ) {
     print "Codesigning with identity '$identity' for iOS device\n";
-
-    0 == system "codesign -s '$identity' \"$bundlePath\""
+    0 == system "codesign --force -s '$identity' \"$bundlePath\""
         or error "Could not codesign as '$identity': $bundlePath";
+}
 
+if ( $isDevice ) {
+    (my $execRoot = $executable) =~ s@/[^/]+$@@;
     $bundlePath = copyToDevice( $bundlePath, "$deviceRoot/tmp/$productName.bundle" );
 }
 
@@ -523,6 +643,6 @@ print "!$bundlePath\n";
 
 my $injectionCountFileName = "${InjectionBundle}/injectionCount.txt";
 system "touch $injectionCountFileName";
-my $injectionCount = loadFile( $injectionCountFileName ) + 1;
+my $injectionCount = (loadFile( $injectionCountFileName )||0) + 1;
 saveFile( $injectionCountFileName, $injectionCount );
 print "!!$injectionCount injections performed so far.\n";

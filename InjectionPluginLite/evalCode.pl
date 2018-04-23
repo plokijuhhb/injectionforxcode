@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 
-#  $Id: //depot/InjectionPluginLite/evalCode.pl#9 $
+#  $Id: //depot/injectionforxcode/InjectionPluginLite/evalCode.pl#3 $
 #  Injection
 #
 #  Created by John Holdsworth on 16/01/2012.
@@ -16,6 +16,7 @@ use URI::Escape;
 use common;
 
 my ($pathID, $className, $isSwift, $code) = split /\^/, $selectedFile;
+$className =~ s/^\w+\.//;
 
 print "Searching logs in $logDir\n";
 
@@ -77,13 +78,30 @@ $additionsTag
 
 extension @{[$swiftClass||$className]} {
 
-    func xprintln(str:String) {
-        if let xprobe: AnyClass = NSClassFromString("Xprobe") {
-            dispatch_after(DISPATCH_TIME_NOW, dispatch_get_main_queue(), {
-                NSThread.detachNewThreadSelector(Selector("xlog:"), toTarget:xprobe, withObject:str as NSString)
-            })
+    func xprint<T>(_ str: T) {
+        if let xprobe = NSClassFromString("Xprobe") {
+            #if swift(>=3.0)
+            Thread.detachNewThreadSelector(Selector(("xlog:")), toTarget:xprobe, with:"\\(str)" as NSString)
+            #else
+            NSThread.detachNewThreadSelector(Selector("xlog:"), toTarget:xprobe, withObject:"\\(str)" as NSString)
+            #endif
         }
     }
+
+    #if swift(>=3.0)
+    struct XprobeOutputStream: TextOutputStream {
+        var out = ""
+        mutating func write(_ string: String) {
+            out += string
+        }
+    }
+
+    func xdump<T>(_ arg: T) {
+        var stream = XprobeOutputStream()
+        dump(arg, to: &stream)
+        xprint(stream.out)
+    }
+    #endif
 
     \@objc func onXprobeEval() {
         $code
@@ -110,7 +128,7 @@ static void XLog( NSString *format, ... ) {
     [NSClassFromString(@"Xprobe") xlog:[[NSString alloc] initWithFormat:format arguments:argp]];
 }
 
-static void xprintln( const char *msg ) {
+static void xprint( const char *msg ) {
     XLog( \@"Swift language used for Objective-C injection: %s", msg );
 }
 #pragma clang diagnostic pop
@@ -125,6 +143,8 @@ static void xprintln( const char *msg ) {
 
 #endif
 ENDCODE
+
+print "!#$className $selectedFile\n";
 
 open SOURCE, "> $selectedFile" or die "Could not write to source: $selectedFile";
 print SOURCE $source;

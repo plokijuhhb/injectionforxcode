@@ -4,7 +4,7 @@
 //
 //  Generic access to get/set ivars - functions so they work with Swift.
 //
-//  $Id: //depot/XprobePlugin/Classes/IvarAccess.h#35 $
+//  $Id: //depot/XprobePlugin/Classes/IvarAccess.h#43 $
 //
 //  Source Repo:
 //  https://github.com/johnno1962/Xprobe/blob/master/Classes/IvarAccess.h
@@ -49,6 +49,7 @@
 #pragma clang diagnostic ignored "-Wunused-exception-parameter"
 #pragma clang diagnostic ignored "-Wc11-extensions"
 #pragma clang diagnostic ignored "-Wvla-extension"
+#pragma clang diagnostic ignored "-Wauto-import"
 #pragma clang diagnostic ignored "-Wvla"
 
 #ifndef _IvarAccess_h
@@ -62,6 +63,9 @@
 #import <Cocoa/Cocoa.h>
 #endif
 
+@interface NSBlock : NSObject
+@end
+
 extern const char *ivar_getTypeEncodingSwift( Ivar ivar, Class aClass );
 extern id xvalueForPointer( id self, const char *name, void *iptr, const char *type );
 extern id xvalueForIvarType( id self, Ivar ivar, const char *type, Class aClass );
@@ -69,14 +73,20 @@ extern id xvalueForIvar( id self, Ivar ivar, Class aClass );
 extern id xvalueForMethod( id self, Method method );
 extern BOOL xvalueUpdateIvar( id self, Ivar ivar, NSString *value );
 extern NSString *xlinkForProtocol( NSString *protolName );
+extern NSString *utf8String( const char *chars );
+extern NSString *xtype( const char *type );
 
-static NSString *utf8String( const char *chars ) {
+NSString *utf8String( const char *chars ) {
     return chars ? [NSString stringWithUTF8String:chars] : @"";
 }
 
+#if 0
 static int xstrncmp( const char *str1, const char *str2 ) {
     return strncmp( str1, str2, strlen( str2 ) );
 }
+#else
+#define xstrncmp( _str1, _str2 ) strncmp( _str1, _str2, sizeof _str2 - 1 )
+#endif
 
 static const char *isOOType( const char *type ) {
     return strncmp( type, "{OO", 3 ) == 0 ? strstr( type, "\"ref\"" ) : NULL;
@@ -86,20 +96,65 @@ static BOOL isCFType( const char *type ) {
     return type && strncmp( type, "^{__CF", 6 ) == 0;
 }
 
+static BOOL isNewRefType( const char *type ) {
+    return type && (xstrncmp( type, "{RetainPtr" ) == 0 ||
+                    xstrncmp( type, "{WeakObjCPtr" ) == 0/* ||
+                    xstrncmp( type, "{LazyInitialized" ) == 0*/);
+}
+
 static BOOL isSwiftObject( const char *type ) {
     return (type[-1] == 'S' && (type[0] == 'a' || type[0] == 'S')) || xstrncmp( type, "{Dictionary}" ) == 0;
 }
 
+@interface XprobeSwift_ : NSObject
++ (NSString *)string:(void *)stringPtr;
++ (NSString *)stringOpt:(void *)stringPtr;
++ (NSString *)array:(void *)arrayPtr;
++ (NSString *)arrayOpt:(void *)arrayPtr;
++ (NSString *)demangle:(NSString *)name;
++ (NSArray<NSString *> *)listMembers:(id)instance;
++ (void)dumpIvars:(id)instance forClass:(Class)aClass into:(NSMutableString *)into;
++ (void)injectionSweep:(id)instance forClass:(Class)aClass;
++ (void)xprobeSweep:(id)instance forClass:(Class)aClass;
+@end
+
+#ifdef XPROBE_MAGIC
+#define ClassInThisBundle ClassInThisBundleX
+#endif
+
+@interface ClassInThisBundle : NSObject
+@end
+@implementation ClassInThisBundle
+@end
+
+Class xloadXprobeSwift( const char *ivarName ) {
+    static Class xprobeSwift;
+    static int triedLoad;
+    NSBundle *thisBundle = [NSBundle bundleForClass:[ClassInThisBundle class]];
+    if ( !xprobeSwift && !(xprobeSwift = [thisBundle classNamed:@"XprobeSwift"]) && !triedLoad++ ) {
+        NSString *bundlePath = [[thisBundle bundlePath] stringByAppendingPathComponent:@"XprobeSwift.loader"];
+        NSBundle *loaderBundle = [NSBundle bundleWithPath:bundlePath];
+        if ( ![loaderBundle load] )
+            NSLog( @"Xprobe: Could not load XprobeSwift bundle for ivar '%s': %@", ivarName, bundlePath );
+        xprobeSwift = [loaderBundle classNamed:@"XprobeSwift"];
+    }
+    return xprobeSwift;
+}
+
 #pragma mark ivar_getTypeEncoding() for swift
 
+//
 // From Jay Freeman's https://www.youtube.com/watch?v=Ii-02vhsdVk
+//
+// Actual structure is https://github.com/apple/swift/blob/master/include/swift/Runtime/Metadata.h#L1552
+//
 
 struct _swift_data {
     unsigned long flags;
     const char *className;
     int fieldcount, flags2;
     const char *ivarNames;
-    struct _swift_field **(*get_field_data)();
+    struct _swift_field **(*get_field_data)(void);
 };
 
 struct _swift_class {
@@ -129,7 +184,7 @@ struct _swift_field {
     struct _swift_field *optional;
 };
 
-static struct _swift_class *isSwift( Class aClass ) {
+struct _swift_class *isSwift( Class aClass ) {
     struct _swift_class *swiftClass = (__bridge struct _swift_class *)aClass;
     return (uintptr_t)swiftClass->pdata & 0x1 ? swiftClass : NULL;
 }
@@ -153,15 +208,124 @@ static const char *skipSwift( const char *typeIdent ) {
     return typeIdent;
 }
 
+struct _swift_data3 {
+    int className;
+    int fieldcount, flags2;
+    int ivarNames;
+    int get_field_data;
+};
+
+struct _swift_field3 {
+//    union {
+//        Class meta;
+//        unsigned long flags;
+        int typeIdent;
+//    };
+//    union {
+//        struct _swift_field *typeInfo;
+//        Class objcClass;
+//    };
+//    void *unknown;
+//    struct _swift_field *optional;
+};
+
+// Swift3 pointers to some metadata are relative
+static const char *swift3Relative( void *ptrPtr ) {
+    intptr_t offset = *(int *)ptrPtr;
+    return offset < 0 ? (const char *)((intptr_t)ptrPtr + offset) : (const char *)offset;
+}
+
+const char *ivar_getTypeEncodingSwift3( Ivar ivar, Class aClass ) {
+    struct _swift_class *swiftClass = isSwift( aClass );
+    struct _swift_data3 *swiftData = (struct _swift_data3 *)swift3Relative( &swiftClass->swiftData );
+    const char *nameptr = swift3Relative( &swiftData->ivarNames );
+    const char *name = ivar_getName(ivar);
+    int ivarIndex;
+
+    for ( ivarIndex=0 ; ivarIndex < swiftData->fieldcount ; ivarIndex++ )
+        if ( strcmp( name, nameptr ) == 0 )
+            break;
+        else
+            nameptr += strlen(nameptr)+1;
+
+    if ( ivarIndex >= swiftData->fieldcount )
+        return NULL;
+
+    struct _swift_field **(*get_field_data)(void) =
+        (struct _swift_field **(*)(void))swift3Relative( &swiftData->get_field_data );
+    struct _swift_field *field0 = get_field_data()[ivarIndex], *field = field0;
+    struct _swift_field3 *typeInfo = (struct _swift_field3 *)swift3Relative( &field->typeInfo );
+    char optionals[100] = "", *optr = optionals;
+
+    if ( field->flags == 0x2 )
+        return "e";
+
+    // unwrap any optionals
+    while ( field->flags == 0x2 || field->flags == 0x3 ) {
+        if ( field->optional && field->optional->flags != 0x3 ) {
+            field = field->optional;
+            typeInfo = (struct _swift_field3 *)swift3Relative( &field->typeInfo );
+            *optr++ = '?';
+            *optr = '\000';
+        }
+        else
+            return strfmt( @"%s%s", swift3Relative( &typeInfo->typeIdent ), optionals );
+    }
+
+    //    printf( "%s %lu\n", name, field->flags );
+
+    if ( field->flags == 0x1 ) { // rawtype
+        const char *typeIdent = swift3Relative( &typeInfo->typeIdent );
+        if ( typeIdent[0] == 'V' ) {
+            if ( (typeIdent[1] == 'S' && (typeIdent[2] == 'C' || typeIdent[2] == 's')) || typeIdent[1] == 's' )
+                return strfmt( @"{%@}%s#%s", utf8String( skipSwift( typeIdent ) ), optionals, typeIdent );
+            else
+                return strfmt( @"{%@}%s#%s", utf8String( skipSwift( skipSwift( typeIdent ) ) ), optionals, typeIdent );
+        }
+        else
+            return strfmt( @"%s%s", typeIdent, optionals )+1;
+    }
+    else if ( field->flags == 0xa ) // function
+        return strfmt( @"^{Block}%s", optionals );
+    else if ( field->flags == 0xc ) // protocol
+        return strfmt( @"@\"<%@>\"%s", utf8String( field->optional->typeIdent ), optionals );
+    else if ( field->flags == 0xe ) // objc class
+        return typeInfoForClass( field->objcClass, optionals );
+    else if ( field->flags == 0x10 ) // pointer
+        return strfmt( @"^{%@}%s", utf8String( skipSwift( field->typeIdent ?: "??" ) ), optionals );
+//    else if ( (field->flags & 0xff) == 0x55 || (field->flags & 0xffff) == 0x8948 ) // enum?
+//        return strfmt( @"e%s", optionals );
+    else if ( field->flags < 0x100 || field->flags & 0x3 ) // unknown/bad isa
+        return strfmt( @"?FLAGS#%lx(%p)%s", field->flags, (void *)field, optionals );
+    else // swift class
+        return typeInfoForClass( (__bridge Class)field, optionals );
+}
+
 // returned type string has "autorelease" scope
 const char *ivar_getTypeEncodingSwift( Ivar ivar, Class aClass ) {
     struct _swift_class *swiftClass = isSwift( aClass );
     if ( !swiftClass )
         return ivar_getTypeEncoding( ivar );
 
+    const char *name = ivar_getName(ivar);
+    BOOL useProperties = 01;
+    if ( useProperties ) {
+        objc_property_t prop = class_getProperty( aClass, name );
+        if ( prop != NULL ) {
+            const char *attrs = property_getAttributes( prop );
+            if ( attrs ) {
+                //NSLog( @"%s %s", name, attrs );
+                return attrs+1;
+            }
+        }
+    }
+
+    // Swift 3.0+ uses relative pointers to reduce relocations
+    if ( (intptr_t)swiftClass->swiftData < 0 )
+        return ivar_getTypeEncodingSwift3(ivar, aClass);
+
     struct _swift_data *swiftData = swiftClass->swiftData;
     const char *nameptr = swiftData->ivarNames;
-    const char *name = ivar_getName(ivar);
     int ivarIndex;
 
     for ( ivarIndex=0 ; ivarIndex < swiftData->fieldcount ; ivarIndex++ )
@@ -177,8 +341,8 @@ const char *ivar_getTypeEncodingSwift( Ivar ivar, Class aClass ) {
     char optionals[100] = "", *optr = optionals;
 
     // unwrap any optionals
-    while ( field->flags == 0x2 ) {
-        if ( field->optional ) {
+    while ( field->flags == 0x2 || field->flags == 0x3 ) {
+        if ( field->optional && field->optional->flags != 0x3 ) {
             field = field->optional;
             *optr++ = '?';
             *optr = '\000';
@@ -187,10 +351,12 @@ const char *ivar_getTypeEncodingSwift( Ivar ivar, Class aClass ) {
             return strfmt( @"%s%s", field->typeInfo->typeIdent, optionals );
     }
 
+//    printf( "%s %lu\n", name, field->flags );
+
     if ( field->flags == 0x1 ) { // rawtype
         const char *typeIdent = field->typeInfo->typeIdent;
         if ( typeIdent[0] == 'V' ) {
-            if ( typeIdent[1] == 'S' && (typeIdent[2] == 'C' || typeIdent[2] == 's') )
+            if ( (typeIdent[1] == 'S' && (typeIdent[2] == 'C' || typeIdent[2] == 's')) || typeIdent[1] == 's' )
                 return strfmt( @"{%@}%s#%s", utf8String( skipSwift( typeIdent ) ), optionals, typeIdent );
             else
                 return strfmt( @"{%@}%s#%s", utf8String( skipSwift( skipSwift( typeIdent ) ) ), optionals, typeIdent );
@@ -206,10 +372,10 @@ const char *ivar_getTypeEncodingSwift( Ivar ivar, Class aClass ) {
         return typeInfoForClass( field->objcClass, optionals );
     else if ( field->flags == 0x10 ) // pointer
         return strfmt( @"^{%@}%s", utf8String( skipSwift( field->typeIdent ?: "??" ) ), optionals );
-    else if ( (field->flags & 0xff) == 0x55 ) // enum?
+    else if ( (field->flags & 0xff) == 0x55 || (field->flags & 0xffff) == 0x8948 ) // enum?
         return strfmt( @"e%s", optionals );
     else if ( field->flags < 0x100 || field->flags & 0x3 ) // unknown/bad isa
-        return strfmt( @"?FLAGS#%lx(%p)%s", field->flags, field, optionals );
+        return strfmt( @"?FLAGS#%lx(%p)%s", field->flags, (void *)field, optionals );
     else // swift class
         return typeInfoForClass( (__bridge Class)field, optionals );
 }
@@ -224,7 +390,7 @@ static void handler( int sig ) {
     longjmp( jmp_env, sig );
 }
 
-static int xprotect( void (^blockToProtect)() ) {
+static int xprotect( void (^blockToProtect)(void) ) {
     void (*savetrap)(int) = signal( SIGTRAP, handler );
     void (*savesegv)(int) = signal( SIGSEGV, handler );
     void (*savebus )(int) = signal( SIGBUS,  handler );
@@ -247,28 +413,6 @@ static int xprotect( void (^blockToProtect)() ) {
     signal( SIGSEGV, savesegv );
     signal( SIGTRAP, savetrap );
     return signum;
-}
-
-@interface XprobeSwift : NSObject
-+ (NSString *)string:(void *)stringPtr;
-+ (NSString *)stringOpt:(void *)stringPtr;
-+ (NSString *)array:(void *)arrayPtr;
-+ (NSString *)arrayOpt:(void *)arrayPtr;
-@end
-
-static Class xloadXprobeSwift( const char *ivarName ) {
-    static Class xprobeSwift;
-    static int triedLoad;
-    if ( !xprobeSwift && !(xprobeSwift = objc_getClass("XprobeSwift")) && !triedLoad++ ) {
-#ifdef XPROBE_MAGIC
-        NSBundle *thisBundle = [NSBundle bundleForClass:[Xprobe class]];
-        NSString *bundlePath = [[thisBundle bundlePath] stringByAppendingPathComponent:@"XprobeSwift.loader"];
-        if ( ![[NSBundle bundleWithPath:bundlePath] load] )
-            NSLog( @"Xprobe: Could not load XprobeSwift bundle for ivar '%s': %@", ivarName, bundlePath );
-        xprobeSwift = objc_getClass("XprobeSwift");
-#endif
-    }
-    return xprobeSwift;
 }
 
 id xvalueForPointer( id self, const char *name, void *iptr, const char *type ) {
@@ -311,7 +455,9 @@ id xvalueForPointer( id self, const char *name, void *iptr, const char *type ) {
 
             return [NSString stringWithFormat:@"0x%x", *(unsigned short *)iptr];
 
-        case 'e': return @(*(int *)iptr);
+        case 'O':
+        case 'e': return @(*(unsigned *)iptr);
+
         case 'f': return @(*(float *)iptr);
         case 'd': return @(*(double *)iptr);
 
@@ -336,6 +482,15 @@ id xvalueForPointer( id self, const char *name, void *iptr, const char *type ) {
         case 'L': return @(*(unsigned long *)iptr);
 
         case '@': {
+            const char *suffix = strchr( name, '.' );
+            const char *mname = suffix ? strndup( name, suffix-name ) : name;
+            Method m = class_getInstanceMethod( object_getClass( self ), sel_registerName( mname ) );
+            if ( m && method_getTypeEncoding( m )[0] == '@' ) {
+                id (*imp)( id, SEL ) = (id (*)( id, SEL ))method_getImplementation( m );
+                if ( imp )
+                    return imp( self, method_getName( m ) );
+            }
+
             __block id out = trapped;
 
             xprotect( ^{
@@ -370,13 +525,21 @@ id xvalueForPointer( id self, const char *name, void *iptr, const char *type ) {
             }
             return [NSValue valueWithPointer:*(void **)iptr];
 
-        case '{': @try {
-            if ( xstrncmp( type+1, "Int8" ) == 0 )
+        case '{': case '(': @try {
+            if ( isNewRefType( type ) )
+                return *(const id *)iptr;
+            else if ( xstrncmp( type+1, "Int8" ) == 0 )
                 return @(*(char *)iptr);
             else if ( xstrncmp( type+1, "Int16" ) == 0 )
                 return @(*(short *)iptr);
             else if ( xstrncmp( type+1, "Int32" ) == 0 )
                 return @(*(int *)iptr);
+            if ( xstrncmp( type+1, "UInt8" ) == 0 )
+                return @(*(unsigned char *)iptr);
+            else if ( xstrncmp( type+1, "UInt16" ) == 0 )
+                return @(*(unsigned short *)iptr);
+            else if ( xstrncmp( type+1, "UInt32" ) == 0 )
+                return @(*(unsigned int *)iptr);
             else if ( xstrncmp( type, "{Dictionary}" ) == 0 ) {
                 const char *suffix = strchr( name, '.' );
                 const char *mname = suffix ? strndup( name, suffix-name ) : name;
@@ -397,7 +560,9 @@ id xvalueForPointer( id self, const char *name, void *iptr, const char *type ) {
 
             // remove names for valueWithBytes:objCType:
             char cleanType[1000], *tptr = cleanType;
-            while ( *type )
+            while ( *type ) {
+                if ( *type == ',' )
+                    break;
                 if ( *type == '"' ) {
                     while ( *++type != '"' )
                         ;
@@ -405,33 +570,34 @@ id xvalueForPointer( id self, const char *name, void *iptr, const char *type ) {
                 }
                 else
                     *tptr++ = *type++;
+            }
             *tptr = '\000';
 
             // for incomplete Swift encodings
             if ( strchr( cleanType, '=' ) )
                 ;
-            else if ( xstrncmp( cleanType, "{CGFloat}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{CGFloat" ) == 0 )
                 return @(*(CGFloat *)iptr);
-            else if ( xstrncmp( cleanType, "{CGPoint}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{CGPoint" ) == 0 )
                 strcpy( cleanType, @encode(CGPoint) );
-            else if ( xstrncmp( cleanType, "{CGSize}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{CGSize" ) == 0 )
                 strcpy( cleanType, @encode(CGSize) );
-            else if ( xstrncmp( cleanType, "{CGRect}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{CGRect" ) == 0 )
                 strcpy( cleanType, @encode(CGRect) );
 #if TARGET_OS_IPHONE
-            else if ( xstrncmp( cleanType, "{UIOffset}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{UIOffset" ) == 0 )
                 strcpy( cleanType, @encode(UIOffset) );
-            else if ( xstrncmp( cleanType, "{UIEdgeInsets}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{UIEdgeInsets" ) == 0 )
                 strcpy( cleanType, @encode(UIEdgeInsets) );
 #else
-            else if ( xstrncmp( cleanType, "{NSPoint}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{NSPoint" ) == 0 )
                 strcpy( cleanType, @encode(NSPoint) );
-            else if ( xstrncmp( cleanType, "{NSSize}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{NSSize" ) == 0 )
                 strcpy( cleanType, @encode(NSSize) );
-            else if ( xstrncmp( cleanType, "{NSRect}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{NSRect" ) == 0 )
                 strcpy( cleanType, @encode(NSRect) );
 #endif
-            else if ( xstrncmp( cleanType, "{CGAffineTransform}" ) == 0 )
+            else if ( xstrncmp( cleanType, "{CGAffineTransform" ) == 0 )
                 strcpy( cleanType, @encode(CGAffineTransform) );
 
             return [NSValue valueWithBytes:iptr objCType:cleanType];
@@ -533,7 +699,6 @@ NSString *xlinkForProtocol( NSString *protolName ) {
             protolName, protolName, [protocolName isEqualToString:@"nil"] ? protolName : protocolName];
 }
 
-static NSString *xtype( const char *type );
 
 static NSString *xtypeStar( const char *type, const char *star ) {
     if ( type[-1] == '@' ) {
@@ -548,16 +713,16 @@ static NSString *xtypeStar( const char *type, const char *star ) {
     const char *end = ++type;
     if ( *end == '?' )
         end = end+strlen(end);
-        else
-            while ( isalnum(*end) || *end == '_' || *end == ',' || *end == '.' || *end < 0 )
-                end++;
+    else
+        while ( isalnum(*end) || *end == '_' || *end == ',' || *end == '.' || *end < 0 )
+            end++;
     NSString *typeName = [[NSString alloc] initWithBytes:type length:end-type encoding:NSUTF8StringEncoding];
     Class theClass = NSClassFromString( typeName );
     if ( theClass )
-        typeName = NSStringFromClass( theClass );
+        typeName = [[xloadXprobeSwift( type ) demangle:typeName]
+                    stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"] ?: NSStringFromClass( theClass );
     if ( type[-1] == '<' )
-        return [NSString stringWithFormat:@"id&lt;%@&gt;",
-                xlinkForProtocol( typeName )];
+        return [NSString stringWithFormat:@"id&lt;%@&gt;", xlinkForProtocol( typeName )];
     else
         return [NSString stringWithFormat:@"<span onclick=\\'this.id=\"%@\"; "
                 "sendClient( \"class:\", \"%@\" ); event.cancelBubble=true;\\'>%@</span>%s",
@@ -578,6 +743,7 @@ static NSString *xtype_( const char *type ) {
         case 's': return @"short";
         case 'S': return type[-1] == 'S' ? @"String" : @"unsigned short";
         case 'e': return @"Enum";
+        case 'O': return [NSString stringWithFormat:@"enum %s", type+1];
         case 'i': return type[-1] == 'S' ? @"Int" : @"int";
         case 'I': return @"unsigned";
         case 'f': return @"float";
@@ -613,7 +779,7 @@ static NSString *xtype_( const char *type ) {
     }
 }
 
-static NSString *xtype( const char *type ) {
+NSString *xtype( const char *type ) {
     NSString *typeStr = xtype_( type );
     return [NSString stringWithFormat:@"<span class=\\'%@\\' title=\\'%s\\'>%@</span>",
             [typeStr hasSuffix:@"*"] ? @"classStyle" : @"typeStyle", type, typeStr];

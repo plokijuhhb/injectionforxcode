@@ -1,5 +1,5 @@
 //
-//  $Id: //depot/InjectionPluginLite/Classes/INPluginMenuController.h#15 $
+//  $Id: //depot/injectionforxcode/InjectionPluginLite/Classes/INPluginMenuController.h#1 $
 //  InjectionPluginLite
 //
 //  Created by John Holdsworth on 15/01/2013.
@@ -21,20 +21,31 @@
 //  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 
-#import "INPluginClientController.h"
-#import "BundleInjection.h"
 #import <WebKit/WebKit.h>
 
-@interface INPluginMenuController : NSObject
+@class INPluginClientController;
+@interface INPluginMenuController : NSObject <NSApplicationDelegate>
+
+@property (nonatomic,retain) IBOutlet NSButton *watchButton;
+@property (nonatomic,retain) IBOutlet INPluginClientController *client;
+@property (nonatomic,retain) NSMutableDictionary<NSString *,NSDate *> *lastInjected;
+@property (nonatomic,retain) NSString *lastFile;
 
 - (NSUserDefaults *)defaults;
 - (NSArray *)serverAddresses;
 - (NSString *)workspacePath;
+
 - (void)error:(NSString *)format, ...;
 - (void)enableFileWatcher:(BOOL)enabled;
+- (IBAction)watchChanged:sender;
+
 - (void)startProgress;
+- (void)setProgress:(NSNumber *)fraction;
 
 - (NSString *)buildDirectory;
 - (NSString *)logDirectory;
+- (NSString *)xcodeApp;
 
 @end
+
+extern INPluginMenuController *injectionPlugin;

@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 
-#  $Id: //depot/InjectionPluginLite/patchProject.pl#17 $
+#  $Id: //depot/injectionforxcode/InjectionPluginLite/patchProject.pl#2 $
 #  Injection
 #
 #  Created by John Holdsworth on 15/01/2013.
@@ -41,28 +41,28 @@ print "\\b Patching project contained in: $projRoot\n";
 
 ###################################################################################################
 # patch project .pch files (if not using AppCode)
-if ( !$isAppCode ) {
-    patchAll( "refix.pch|Bridging-Header-Not.h", sub {
-    $_[0] =~ s/\n*($key.*)?$/<<CODE/es;
+#if ( !$isAppCode ) {
+#    patchAll( "refix.pch|Bridging-Header-Not.h", sub {
+#    $_[0] =~ s/\n*($key.*)?$/<<CODE/es;
+#
+#
+#$key
+#
+##ifdef $ifdef
+##define INJECTION_ENABLED
+#
+##import "$resources/BundleInterface.h"
+##endif
+#CODE
+#    } );
+#}
 
-
-$key
-
-#ifdef $ifdef
-#define INJECTION_ENABLED
-
-#import "$resources/BundleInterface.h"
-#endif
-CODE
-    } );
-}
-
-$ifdef .= "\n#define INJECTION_PORT $selectedFile" if $isAppCode;
+$ifdef .= "\n#define INJECTION_PORT $selectedFile" if $isAppCode || $selectedFile;
 
 ###################################################################################################
 # patch normal Xcode projects
 if ( !-d "$projRoot$projName.approj" ) {
-    patchAll( "main.(m|mm)", sub {
+    patchAll( "\./main.(m|mm)", sub {
         $_[0] =~ s/\n*($key.*)?$/<<CODE/es;
 
 
@@ -111,8 +111,8 @@ CODE
 
 ###################################################################################################
 # ensure symbols exported
-my $dontHideSymbols = "GCC_SYMBOLS_PRIVATE_EXTERN = NO;";
-patchAll( "project.pbxproj", sub {
-    $_[0] =~ s@(/\* Debug \*/ = \{[^{]*buildSettings = \{(\s*)[^}]*)(};)@$1$dontHideSymbols$2$3@g
-        if $_[0] !~ /$dontHideSymbols/;
-} );
+#my $dontHideSymbols = "GCC_SYMBOLS_PRIVATE_EXTERN = NO;";
+#patchAll( "project.pbxproj", sub {
+#    $_[0] =~ s@(/\* Debug \*/ = \{[^{]*buildSettings = \{(\s*)[^}]*)(};)@$1$dontHideSymbols$2$3@g
+#        if $_[0] !~ /$dontHideSymbols/;
+#} );

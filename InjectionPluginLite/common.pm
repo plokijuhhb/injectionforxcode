@@ -1,5 +1,5 @@
 #
-#  $Id: //depot/InjectionPluginLite/common.pm#28 $
+#  $Id: //depot/injectionforxcode/InjectionPluginLite/common.pm#3 $
 #  Injection
 #
 #  Created by John Holdsworth on 16/01/2012.
@@ -17,13 +17,14 @@ use vars qw($resources $workspace $deviceRoot $executable $arch $patchNumber $fl
     $isIOS $productName $appPackage $deviceRoot $projFile $projRoot $projName $projType
     $InjectionBundle $template $header $appClass $RED $xcodeApp $buildRoot $logDir $learnt
     $INJECTION_FLAGCHANGE $INJECTION_STORYBOARD $INJECTION_NOTSILENT $INJECTION_ORDERFRONT
-    $INJECTION_ISAPPCODE);
+    $INJECTION_ISAPPCODE $INJECTION_DEVICEIOS8);
 
 $INJECTION_FLAGCHANGE = 1<<0; # flag values have changed
 $INJECTION_STORYBOARD = 1<<1; # storyboard injection enabled/used
 $INJECTION_NOTSILENT  = 1<<2; # print annoying dialogue on injection
 $INJECTION_ORDERFRONT = 1<<3; # order from OSX App or simulator
 $INJECTION_ISAPPCODE  = 1<<4; # injecting from AppCode plugin
+$INJECTION_DEVICEIOS8 = 1<<5; # iOS 8 splits data from app
 
 ($resources, $workspace, $deviceRoot, $executable, $arch, $patchNumber, $flags,
     $unlockCommand, $addresses, $selectedFile, $xcodeApp, $buildRoot, $logDir, $learnt) = @ARGV;
@@ -32,9 +33,9 @@ $INJECTION_ISAPPCODE  = 1<<4; # injecting from AppCode plugin
 
 $productName = "InjectionBundle$patchNumber";
 
-$isDevice = $executable =~ m@^(/private)?/var/mobile/@;
-$isSimulator = $executable =~ m@/(iPhone |Core)Simulator/@;
-$isAndroid = $executable =~ m@^/data/app/@;
+$isDevice = $deviceRoot =~ m@^(/private)?/var/mobile/@;
+$isSimulator = $deviceRoot =~ m@/(iPhone |Core)Simulator/@;
+$isAndroid = $deviceRoot =~ m@^/data/app/@;
 
 $isAppCode = $flags & $INJECTION_ISAPPCODE;
 $deviceRoot = $executable if $isAppCode;
@@ -49,7 +50,10 @@ $flags &= ~$INJECTION_NOTSILENT if $isAppCode;
     ("OSXBundleTemplate", "Cocoa/Cocoa.h", "NSApplication");
 
 ($InjectionBundle = $template) =~ s/BundleTemplate/InjectionProject/;
-#$InjectionBundle = "$logDir/../$InjectionBundle" if !$isAppCode;
+if ( $ENV{IS_INJECTION_APP} ) {
+    $xcodeApp = "" if !-d $xcodeApp;
+    $InjectionBundle = "$logDir/../$InjectionBundle" if !$isAppCode && $logDir;
+}
 
 BEGIN { $RED = "{\\colortbl;\\red0\\green0\\blue0;\\red255\\green100\\blue100;}\\cb2"; }
 

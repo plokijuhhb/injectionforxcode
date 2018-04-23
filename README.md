@@ -7,15 +7,33 @@ Copyright (c) John Holdsworth 2012-16
 Injection for Xcode is an Xcode plugin (available via [Alcatraz](http://alcatraz.io/)) or [AppCode](#user-content-use-with-appcode) that 
 dynamically inserts new Swift / Objective-C code into a running app in order to speed up your build process. It does this without making _any_ changes to your project.
 
+An up-to-date overview by Rob Norback of [how to incorporate it into your workflow is here](https://medium.com/@robnorback/the-secret-to-1-second-compile-times-in-xcode-9de4ec8345a1)
+
 ![Injection Example](documentation/images/injected.gif)
 
 Announcements of major additions to the project will be made on twitter [@Injection4Xcode](https://twitter.com/@Injection4Xcode).
+
+### Stop Press
+
+If you know the trick which I won't detail here plugins still load in Xcode 8 GM and injection has been
+updated for it and Swift 3. Patched injection works fine and unpatched injection works if the
+"InjectionLoader" bundle is codesigned for the simulator. This is done in a "Run Script" build phase in this
+project if you need to update the code signing identity to dis-ambiguate it. Please raise issues 
+with any problems or look at [this blog](https://johntmcintosh.com/blog/2016/10/03/code-injection-ios).
+One thing I have noticed is you can no longer add methods using injection which was proably never a
+particularly good idea in Swift.
+
+### Stop Stop Press
+
+Injection is now available as a standalone app rather than have to build the plugin which you can download [here](http://johnholdsworth.com/injection.html). As injection no longer works on the deivce due to sandboxing in iOS10 this is the recommended route going forward. For more information consult the [FAQ](https://johnno1962.github.io/InjectionApp/injectionfaq.html).
+
+For TDD, there is a interesting fork of the injection plugin you can download [here](https://github.com/polac24/injectionforxcode/tree/tdd). It runs all tests covering a source file each time you inject. It's on the 'tdd' branch.
 
 ## How to Use Injection for Xcode
 
 For installation and usage for AppCode [see below](#user-content-use-with-appcode). If you're a visual learner, you may appreciate [this video post](http://artsy.github.io/blog/2016/03/05/iOS-Code-Injection/) from [@Orta](https://twitter.com/@orta) covering the basics.
 
-With Xcode, either install via Alcatraz, or install by cloning this repo and build `InjectionPluginLite/InjectionPlugin.xcodeproj`. 
+With Xcode, either install via Alcatraz, or install by cloning this repo and build `InjectionPluginLite/InjectionPlugin.xcodeproj`. If you are building locally, note that you need to restart Xcode to load the plugin. A popup should appear asking to confirm loading a plugin not signed by Apple, that signals that the plugin is set up.
 
 The plugin can be removed either via Alcatraz, or by running: `rm -rf ~/Library/Application\ Support/Developer/Shared/Xcode/Plug-ins/InjectionPlugin.xcplugin`
 
@@ -32,7 +50,7 @@ app is loaded, add a new function `- injected`  and add a breakpoint on that lin
 ```
 or
 ``` swift
-func injected() {
+@objc func injected() {
     print("I've been injected: \(self)")
 }
 ```
@@ -82,6 +100,8 @@ patching the class' "vtable". This excludes the injection of methods of structs.
 
 ## What Else Does This Plugin Do?
 
+* It has file watcher that can inject when a file is saved from whichever editor you use. Enable this in the preferences pane accessed on menu item "Product/Injection Plugin/Tunable Parameters": "File Watcher".
+
 * There is support for working specifically with [Storyboard-based iOS projects](documentation/storyboards.md).
 
 * The plugin offers a way to quickly change a [collection of tunable parameters](documentation/tunable_parameters.md)
@@ -97,6 +117,8 @@ for the changes which are injected into your project, it is recommended to add t
 * The injection key command can be customised from <kbd>ctrl</kbd>+<kbd>=</kbd> in the "Tunable App Parameters" panel.
 
 * Works on a device, if you apply a [patch to your project.](documentation/patching_injection.md).
+
+* Perform unit tests that cover your Swift class/struct/enum. For details see [TDD with Injection for Xcode](documentation/tdd.md)
 
 ## What Happens with Swift?
 
@@ -127,9 +149,10 @@ Injection can be used from inside AppCode provided the application [has been pat
 you have previously injected that project from inside Xcode to set up a link to the 
 build logs. 
 
-To install, copy the jar file `InjectionPluginAppCode/Injection.jar` from this repo 
-to `~/Library/Application Support/AppCode3*`. You’ll need to re-patch the project
-from inside AppCode as it uses a different port number to connect.
+To install, download the jar file `InjectionPluginAppCode/Injection.jar` from this repo 
+and go to AppCode preferences, choose "Install plugin from disk" and locate the .jar.
+Then restart the IDE. Now you will get new menu options under the Run menu.
+You’ll need to re-patch the project from inside AppCode as it uses a different port number to connect.
 
 ## Limitations of Injection
 
@@ -155,28 +178,4 @@ support this common idiom.
 * The function `dispatch_on_main` does not inject, as it has been statically linked into
 the application. It does however, inject by proxy in the case shown via the `doSomething`
 method. `dispatch_on_main` will have been linked locally to a version in the object file being injected.
-
-
-## "Nagware" License
-
-This source code is provided on github on the understanding it will not be redistributed.
-License is granted to use this software during development for any purpose for two weeks
-(it should never be included in a released application!) After two weeks you
-will be invited to make a donation $10 (or $25 in a commercial environment)
-as suggested by code included in the software.
-
-If you find (m)any issues in the code, get in contact using the email: support (at) injectionforxcode.com
-
-## Please note:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
